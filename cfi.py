@@ -6,19 +6,13 @@ import numpy as np
 import sklearn
 from sklearn.metrics import accuracy_score,roc_curve,auc,roc_auc_score
 
-# def run():
-#     model = joblib.load('models/rf.joblib')
-#     print('estimator',model.estimator_)
-#     print('estimators',model.estimators_)
-#     print('classes',model.classes_)
-#     print('n_classes',model.estimator_)
-
 
 def get_cut_points(tree: sklearn.tree, z: Optional[List[int]] = None,x_j: Optional[int] = None ): # type: ignore
 
     '''tree is a single instance of the model of type sklearn.tree
     z is the list of feature indexes to be conditioned on
-    x_j is the feature id on whose importance we need are trying to estimate'''
+    x_j is the feature id on whose importance we need are trying to estimate
+    returns features, thresholds which are the feature names and at what threshold the feature splits the data'''
 
     start_node = 0
     depth = 0
@@ -65,13 +59,16 @@ def prepare_data(df,features: np.array, thresholds: np.array, z: List[int], x_j:
     for idx,row in df.iterrows():
         grid_loc = []
         for var in z:
+            # get the feature thresholds by indexing the thresholds array with the feature index
             cutpoints = np.sort(thresholds[features == var])
             #breakpoint()
+            #
             cut_at = np.searchsorted(cutpoints,row.iloc[var])
             grid_loc.append(cut_at)
-        
+        # this is a tuple of unique cutpoints and each such tuple contains a list of indices of the rows that fall in that cell
         grid_points[tuple(grid_loc)].append(idx)
     #breakpoint()
+    # for each unique cutpoint tuple, permute all the values in the feature x_j for all the rows that fall in that tuple
     for cell, indices in grid_points.items():
             if len(indices) > 1:
                 values = df.iloc[indices, x_j].values
@@ -83,36 +80,72 @@ def prepare_data(df,features: np.array, thresholds: np.array, z: List[int], x_j:
 
 def get_cfi_scores(model,test_df,target):
 
-    cfi_score = 0
-    n_estimators = model.n_estimators
-    z = [5,7]
+    '''get the conditional feature importance score for all features - Random Forest Models'''
 
-    for tree in model.estimators_:
-        
-        f,t = get_cut_points(tree,z,9)
-        permuted_df = prepare_data(test_df,f,t,z,9)
-        true_scores = tree.predict(test_df)
-        conditional_scores = tree.predict(permuted_df)
+    cfi_score_dict = defaultdict(int)
+    n_estimators = model.n_estimators
+    features = test_df.columns.tolist()
+    # get the feature names and indices - this will be used to get x_j,z pairs where x_j is the feature 
+    # whose importance we are looking for and z is the set of all features to be conditioned on
+    feature_set = dict(zip(features, range(len(features))))
+    test_df = test_df.reset_index(drop=True)
+    
+    # ietrate through all features 
+    for feature in features:
+        cfi_score = 0
+        set_copy = feature_set.copy()
+        x_j = set_copy.pop(feature)
+        z = list(set_copy.values())
+
+        for tree in model.estimators_:
+            
+            f,t = get_cut_points(tree,z,x_j)
+            permuted_df = prepare_data(test_df,f,t,z,x_j)
+            true_scores = tree.predict(test_df.to_numpy())
+            true_accuracy = accuracy_score(target, true_scores)
+            conditional_scores = tree.predict(permuted_df.to_numpy())
+            condtional_accuracy = accuracy_score(target, conditional_scores)
+            cfi_score += true_accuracy - condtional_accuracy
+       # breakpoint()
+        cfi_score_dict[feature] = cfi_score/n_estimators
+
+    return cfi_score_dict
+
+def get_dt_cfi_scores(model,test_df,target):
+
+    '''get the conditional feature importance score for all features - Decision Tree Models'''
+
+    cfi_score_dict = defaultdict(int)
+    features = test_df.columns.tolist()
+    feature_set = dict(zip(features, range(len(features))))
+    test_df = test_df.reset_index(drop=True)
+    
+    for feature in features:
+        cfi_score = 0
+        set_copy = feature_set.copy()
+        x_j = set_copy.pop(feature)
+        z = list(set_copy.values())
+
+        f,t = get_cut_points(model,z,x_j)
+        permuted_df = prepare_data(test_df,f,t,z,x_j)
+        true_scores = model.predict(test_df.to_numpy())
         true_accuracy = accuracy_score(target, true_scores)
+        conditional_scores = model.predict(permuted_df.to_numpy())
         condtional_accuracy = accuracy_score(target, conditional_scores)
         cfi_score += true_accuracy - condtional_accuracy
        # breakpoint()
+        cfi_score_dict[feature] = cfi_score
 
-    return cfi_score/n_estimators
+    return cfi_score_dict
 
 
 
 if __name__ == '__main__':
     
-    df = pd.read_csv('data/test_df.csv',index_col=False)
-    target = df['admission_label'].copy()
-    features = df.drop('admission_label', axis=1)
     model = joblib.load('models/rf.joblib')
-    # z = [5,7]
-    # f,t = get_cut_points(model.estimators_[0],z,9)
-    # print(f,t)
-    # # breakpoint()
-    # gr = prepare_data(df,f,t,z,9)
-    score = get_cfi_scores(model,features,target)
+    df = pd.read_csv('data/test_df.csv',index_col=False)
+    target = df['label'].copy()
+    test_df = df.drop('label', axis=1)
+    score = get_cfi_scores(model,test_df,target)
     print(f'cfi score {score}')
     
